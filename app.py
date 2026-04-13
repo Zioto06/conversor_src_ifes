@@ -238,18 +238,38 @@ def reorganizar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     primeira_linha = df.iloc[0]
 
     if eh_cabecalho(primeira_linha):
-        df = df.iloc[1:].reset_index(drop=True)
+        cabecalho = primeira_linha.tolist()
 
-    df_dados = df.copy()
+        # remove a linha do cabeçalho antes do processamento
+        df_dados = df.iloc[1:].copy().reset_index(drop=True)
 
-    mapeamento = identificar_colunas_por_conteudo(df_dados)
+        mapeamento = mapear_colunas_do_cabecalho(cabecalho)
 
-    df_reorganizado = pd.DataFrame()
+        # se não conseguir mapear tudo pelo cabeçalho, completa por conteúdo
+        if len(mapeamento) < 7:
+            mapeamento_conteudo = identificar_colunas_por_conteudo(df_dados)
+            for coluna in COLUNAS_PADRAO:
+                if coluna not in mapeamento:
+                    mapeamento[coluna] = mapeamento_conteudo[coluna]
 
-    for coluna_padrao in COLUNAS_PADRAO:
-        df_reorganizado[coluna_padrao] = df_dados.iloc[:, mapeamento[coluna_padrao]]
+        df_reorganizado = pd.DataFrame()
 
-    return df_reorganizado
+        for coluna_padrao in COLUNAS_PADRAO:
+            df_reorganizado[coluna_padrao] = df_dados.iloc[:, mapeamento[coluna_padrao]]
+
+        return df_reorganizado
+
+    else:
+        df_dados = df.copy().reset_index(drop=True)
+
+        mapeamento = identificar_colunas_por_conteudo(df_dados)
+
+        df_reorganizado = pd.DataFrame()
+
+        for coluna_padrao in COLUNAS_PADRAO:
+            df_reorganizado[coluna_padrao] = df_dados.iloc[:, mapeamento[coluna_padrao]]
+
+        return df_reorganizado
 
 
 def tratar_dados(df: pd.DataFrame) -> pd.DataFrame:
