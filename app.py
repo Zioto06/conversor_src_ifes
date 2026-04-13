@@ -42,11 +42,12 @@ MAPA_COLUNAS = {
     ],
     "Início da participação": [
         "inicio da participacao", "início da participação", "inicio", "início",
-        "data de inicio", "data de início", "data inicial", "comeco", "começo"
+        "data de inicio", "data de início", "data inicial", "comeco", "começo",
+        "data inicio"
     ],
     "Término da participação": [
         "termino da participacao", "término da participação", "termino", "término",
-        "data de fim", "data final", "fim"
+        "data de fim", "data final", "fim", "data termino", "data término"
     ]
 }
 
@@ -69,7 +70,7 @@ def normalizar_texto(texto):
     return texto
 
 
-def _converter_datas_para_ddmmaa(serie: pd.Series) -> pd.Series:
+def parse_datas_serie(serie: pd.Series) -> pd.Series:
     s = serie.astype(str).str.strip()
     s = s.replace({
         "": None, "nan": None, "NaN": None, "None": None,
@@ -81,6 +82,11 @@ def _converter_datas_para_ddmmaa(serie: pd.Series) -> pd.Series:
     except TypeError:
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
 
+    return dt
+
+
+def _converter_datas_para_ddmmaa(serie: pd.Series) -> pd.Series:
+    dt = parse_datas_serie(serie)
     return dt.dt.strftime("%d/%m/%Y").fillna("")
 
 
@@ -135,18 +141,13 @@ def percentual_match_cpf(serie):
 
 
 def percentual_match_data(serie):
-    s = serie.astype(str).str.strip()
-    validos = s[(s != "") & (~s.isin(["nan", "NaN", "None", "NaT", "nat"]))]
-
-    if len(validos) == 0:
+    validos = parse_datas_serie(serie)
+    validos = validos[validos.notna()]
+    total = serie.astype(str).str.strip()
+    total = total[(total != "") & (~total.isin(["nan", "NaN", "None", "NaT", "nat"]))]
+    if len(total) == 0:
         return 0
-
-    try:
-        dt = pd.to_datetime(validos, errors="coerce", dayfirst=True, format="mixed")
-    except TypeError:
-        dt = pd.to_datetime(validos, errors="coerce", dayfirst=True)
-
-    return dt.notna().mean()
+    return len(validos) / len(total)
 
 
 def percentual_match_carga_horaria(serie):
@@ -186,6 +187,52 @@ def pontuar_coluna(serie):
     }
 
 
+def identificar_papeis_datas(colunas_indices, df):
+    """
+    Recebe os índices das 3 colunas de data e decide qual é:
+    - Data de nascimento: a mais antiga
+    - Início da participação: a menor entre as duas datas mais recentes
+    - Término da participação: a maior entre as duas datas mais recentes
+    """
+    estatisticas = []
+
+    for idx in colunas_indices:
+        dt = parse_datas_serie(df.iloc[:, idx])
+
+        validos = dt.dropna()
+        if len(validos) == 0:
+            raise ValueError("Não foi possível interpretar corretamente uma das colunas de data.")
+
+        estatisticas.append({
+            "idx": idx,
+            "mediana": validos.median(),
+            "min": validos.min(),
+            "max": validos.max()
+        })
+
+    # Data de nascimento tende a ser a mais antiga de todas
+    estatisticas_ordenadas = sorted(estatisticas, key=lambda x: x["mediana"])
+    idx_nascimento = estatisticas_ordenadas[0]["idx"]
+
+    restantes = estatisticas_ordenadas[1:]
+
+    # Entre as duas restantes:
+    # início deve ser a mais antiga / menor
+    # término deve ser a mais recente / maior
+    if restantes[0]["mediana"] <= restantes[1]["mediana"]:
+        idx_inicio = restantes[0]["idx"]
+        idx_termino = restantes[1]["idx"]
+    else:
+        idx_inicio = restantes[1]["idx"]
+        idx_termino = restantes[0]["idx"]
+
+    return {
+        "Data de nascimento": idx_nascimento,
+        "Início da participação": idx_inicio,
+        "Término da participação": idx_termino
+    }
+
+
 def identificar_colunas_por_conteudo(df):
     candidatos = {}
 
@@ -208,23 +255,24 @@ def identificar_colunas_por_conteudo(df):
                 melhor_score = score
                 melhor_idx = idx
 
-        if melhor_idx is not None:
+        if melhor_idx is not None and melhor_score > 0:
             mapeamento[campo] = melhor_idx
             usados.add(melhor_idx)
 
     colunas_restantes = [idx for idx in range(df.shape[1]) if idx not in usados]
 
-    colunas_data = sorted(
-        [(idx, candidatos[idx]["Data"]) for idx in colunas_restantes],
-        key=lambda x: x[0]
-    )
+    colunas_data = []
+    for idx in colunas_restantes:
+        if candidatos[idx]["Data"] > 0:
+            colunas_data.append(idx)
 
     if len(colunas_data) != 3:
-        raise ValueError("Não foi possível identificar corretamente as 3 colunas de data.")
+        raise ValueError(
+            f"Não foi possível identificar corretamente as 3 colunas de data. Encontradas: {len(colunas_data)}."
+        )
 
-    mapeamento["Data de nascimento"] = colunas_data[0][0]
-    mapeamento["Início da participação"] = colunas_data[1][0]
-    mapeamento["Término da participação"] = colunas_data[2][0]
+    papeis_datas = identificar_papeis_datas(colunas_data, df)
+    mapeamento.update(papeis_datas)
 
     return mapeamento
 
@@ -249,6 +297,24 @@ def reorganizar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 if coluna not in mapeamento:
                     mapeamento[coluna] = mapeamento_conteudo[coluna]
 
+        # Ajuste extra: se o cabeçalho não nomear claramente as datas,
+        # reavalia apenas as datas por conteúdo
+        campos_data_presentes = [
+            "Data de nascimento" in mapeamento,
+            "Início da participação" in mapeamento,
+            "Término da participação" in mapeamento
+        ]
+
+        if sum(campos_data_presentes) < 3:
+            usados = {
+                mapeamento[c]
+                for c in mapeamento
+                if c in ["CPF", "E-mail", "Carga horária do certificado", "Nome completo"]
+            }
+            colunas_restantes = [idx for idx in range(df_dados.shape[1]) if idx not in usados]
+            papeis_datas = identificar_papeis_datas(colunas_restantes, df_dados)
+            mapeamento.update(papeis_datas)
+
         df_reorganizado = pd.DataFrame()
 
         for coluna_padrao in COLUNAS_PADRAO:
@@ -258,7 +324,6 @@ def reorganizar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     else:
         df_dados = df.copy().reset_index(drop=True)
-
         mapeamento = identificar_colunas_por_conteudo(df_dados)
 
         df_reorganizado = pd.DataFrame()
